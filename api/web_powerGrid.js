@@ -329,9 +329,9 @@ async function main(family) {
         { rate: 0.9083, name: '三档' }
       ],
       '440000': [ // 广东
-        { limit: isSummer ? 210 : 170, rate: 0.61, name: '一档' },
-        { limit: isSummer ? 400 : 300, rate: 0.66, name: '二档' },
-        { rate: 0.91, name: '三档' }
+        { limit: isSummer ? 210 : 170, rate: 0.67886875, name: '一档' },
+        { limit: isSummer ? 400 : 300, rate: 0.72886875, name: '二档' },
+        { rate: 0.97886875, name: '三档' }
       ],
       '450000': [ // 广西
         { limit: isSummer ? 200 : 180, rate: 0.615, name: '一档' },
