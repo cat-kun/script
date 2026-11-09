@@ -39,8 +39,7 @@ const unavailableBill = (type = '居民') => ({
   type
 });
 
-const formatPreviousBillLabel = (lastMonth, tier, rate) =>
-  `${lastMonth} 上期 · ${tier}\n${rate} 元/度`;
+const formatPreviousBillLabel = (tier, rate) => `${tier} ${rate} 元/度`;
 
 const getRefreshCacheHours = (refreshMinutes) => {
   const minutes = Number(refreshMinutes);
@@ -642,7 +641,7 @@ async function main(family) {
     addBodyText(payStack, (!areaCode ? '用户未登录' : isArrears === '1' ? '待缴费' : '已缴费'), Color.white(), 11, 'bold');
     pointStack.addSpacer(8);
     
-    addBodyText(pointStack, formatPreviousBillLabel(lastMonth, ls_tier, ls_rate), textColor, 11, null, 0.7);
+    addBodyText(pointStack, formatPreviousBillLabel(ls_tier, ls_rate), textColor, 11, null, 0.7);
     pointStack.addSpacer();
     
     const barStack2 = module.createStack(pointStack);
