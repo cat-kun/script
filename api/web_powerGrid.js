@@ -4,10 +4,180 @@
 /**
  * 组件作者: 95度茅台
  * 组件名称: 南方电网
- * 组件版本: Version 1.1.1
- * 发布时间: 2024-11-19
+ * 组件版本: Version 1.1.2
+ * 发布时间: 2026-11-09
  */
 
+// 南网业务地区码与本地电价方案键并非同一套编码，仅映射到电价查表。
+const RATE_AREA_CODE_MAP = Object.freeze({
+  '030500': '440000'
+});
+
+const normalizeAreaCode = (areaCode) => String(areaCode ?? '').trim();
+
+const resolveRateAreaCode = (areaCode) => {
+  const normalized = normalizeAreaCode(areaCode);
+  return RATE_AREA_CODE_MAP[normalized] || normalized;
+};
+
+const parseBillingYearMonth = (yearMonth) => {
+  const match = String(yearMonth ?? '').trim().match(/^(\d{4})-?(\d{2})$/);
+  if (!match) return null;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  if (month < 1 || month > 12) return null;
+  return { year, month };
+};
+
+const unavailableBill = (type = '居民') => ({
+  tier: '无法计算',
+  rate: '--',
+  cost: '--',
+  percent: 0,
+  isPercent: '--',
+  tierIndex: 0,
+  type
+});
+
+const formatPreviousBillLabel = (lastMonth, tier, rate) =>
+  `${lastMonth} 上期 · ${tier}\n${rate} 元/度`;
+
+const getRefreshCacheHours = (refreshMinutes) => {
+  const minutes = Number(refreshMinutes);
+  const validMinutes = Number.isFinite(minutes) && minutes > 0 ? minutes : 20;
+  return Math.max(validMinutes, 5) / 60;
+};
+
+const createCacheFileName = (name, url, requestBody, token, hash) => {
+  const prefix = String(name).replace(/\.json$/i, '').split('_')[0] || 'cache';
+  const payload = JSON.stringify({
+    url,
+    requestBody: requestBody ?? null,
+    token: String(token ?? '')
+  });
+  return `${prefix}_${hash(payload)}.json`;
+};
+
+const calcElectricBill = (totalPower, eleType = '800', areaCode = '', billYearMonth) => {
+  const usage = totalPower === '' || totalPower == null ? NaN : Number(totalPower);
+  const normalizedEleType = String(eleType ?? '800').trim();
+  const billType = normalizedEleType === '800'
+    ? '农用'
+    : normalizedEleType === '300'
+      ? '企业'
+      : '居民';
+
+  if (!Number.isFinite(usage) || usage < 0) return unavailableBill(billType);
+
+  const normalizedAreaCode = normalizeAreaCode(areaCode);
+
+  // 农业用电电价表
+  const agriculturalRatesByCode = {
+    '070000': { rate: 0.514 },
+    '440000': { rate: 0.514 },
+    '450000': { rate: 0.510 },
+    '530000': { rate: 0.508 },
+    '520000': { rate: 0.507 }
+  };
+
+  const agriculturalInfo = agriculturalRatesByCode[normalizedAreaCode];
+  const agriculturalRate = agriculturalInfo ? agriculturalInfo.rate : 0.514;
+
+  // 农业用电计算
+  if (normalizedEleType === '800') {
+    return {
+      tier: '农用',
+      rate: agriculturalRate,
+      cost: (usage * agriculturalRate).toFixed(2),
+      percent: 0,
+      isPercent: '0%',
+      tierIndex: 0,
+      type: '农用'
+    };
+  }
+
+  // 企事业电价
+  if (normalizedEleType === '300') {
+    const enterpriseRate = 0.8696;
+    return {
+      tier: '企业',
+      rate: enterpriseRate,
+      cost: (usage * enterpriseRate).toFixed(2),
+      percent: 0,
+      isPercent: '0%',
+      tierIndex: 0,
+      type: '企业'
+    };
+  }
+
+  const billPeriod = parseBillingYearMonth(billYearMonth);
+  if (!billPeriod) return unavailableBill('居民');
+
+  const isSummer = billPeriod.month >= 4 && billPeriod.month <= 10;
+
+  // 居民电价档次表（按省份划分）
+  const resRatesProv = {
+    '070000': [ // 海南
+      { limit: isSummer ? 220 : 160, rate: 0.6083, name: '一档' },
+      { limit: isSummer ? 400 : 280, rate: 0.6583, name: '二档' },
+      { rate: 0.9083, name: '三档' }
+    ],
+    '440000': [ // 广东
+      { limit: isSummer ? 210 : 170, rate: '0.67886875', name: '一档' },
+      { limit: isSummer ? 400 : 300, rate: '0.72886875', name: '二档' },
+      { rate: '0.97886875', name: '三档' }
+    ],
+    '450000': [ // 广西
+      { limit: isSummer ? 200 : 180, rate: 0.615, name: '一档' },
+      { limit: isSummer ? 400 : 300, rate: 0.665, name: '二档' },
+      { rate: 0.915, name: '三档' }
+    ],
+    '530000': [ // 云南
+      { limit: isSummer ? 200 : 160, rate: 0.6, name: '一档' },
+      { limit: isSummer ? 400 : 300, rate: 0.65, name: '二档' },
+      { rate: 0.9, name: '三档' }
+    ],
+    '520000': [ // 贵州
+      { limit: isSummer ? 230 : 170, rate: 0.605, name: '一档' },
+      { limit: isSummer ? 400 : 300, rate: 0.655, name: '二档' },
+      { rate: 0.905, name: '三档' }
+    ]
+  };
+
+  const provinceRates = resRatesProv[resolveRateAreaCode(normalizedAreaCode)];
+  if (!provinceRates) return unavailableBill('居民');
+
+  let remainingPower = usage;
+  let totalCost = 0;
+  let lastTierName = '一档';
+  let tierIndex = 0;
+
+  for (let i = 0; i < provinceRates.length; i++) {
+    const { limit, rate, name } = provinceRates[i];
+    lastTierName = name;
+    tierIndex = i + 1;
+
+    const prevLimit = provinceRates[i - 1]?.limit || 0;
+    const powerThisTier = limit ? Math.min(remainingPower, limit - prevLimit) : remainingPower;
+    totalCost += powerThisTier * Number(rate);
+    remainingPower -= powerThisTier;
+    if (remainingPower <= 0) break;
+  }
+
+  const secondTierLimit = provinceRates[1]?.limit || 1;
+  const percentageOfSecondTier = usage / secondTierLimit;
+  const isPercent = usage > 0 ? Math.floor(percentageOfSecondTier * 100) : 0;
+
+  return {
+    tier: lastTierName,
+    rate: provinceRates[tierIndex - 1].rate,
+    cost: totalCost.toFixed(2),
+    percent: percentageOfSecondTier,
+    isPercent: `${isPercent}%`,
+    tierIndex,
+    type: normalizedEleType === '500' ? '居民' : '企业'
+  };
+};
 
 async function main(family) {
   const fm = FileManager.local();  
@@ -135,16 +305,21 @@ async function main(family) {
    * @param {string} string
    * @returns {object} - JSON
    */
-  const getCacheString = async (jsonName, jsonUrl, requestBody) => {
+  const getCacheString = async (jsonName, jsonUrl, requestBody, cacheTime = 4) => {
     const { type } = module.getFileInfo(jsonName);
-    const cache = module.useFileManager({ 
-      cacheTime: 4, type 
-    });
-    const json = cache.read(jsonName);
+    const cache = module.useFileManager({ cacheTime, type });
+    const cacheName = createCacheFileName(
+      jsonName,
+      jsonUrl,
+      requestBody,
+      token,
+      module.hash
+    );
+    const json = cache.read(cacheName);
     if (json) return json;
     const response = await makeRequest(jsonUrl, requestBody);
     const { sta } = response;
-    if (sta == 00) cache.write(jsonName, response);
+    if (sta == 00) cache.write(cacheName, response);
     return response;
   }; 
   
@@ -192,7 +367,8 @@ async function main(family) {
         areaCode,
         yearMonth,
         meteringPointId,
-      }
+      },
+      getRefreshCacheHours(setting.refresh)
     );
     if (response.sta == 00) {
       return response.data;
@@ -238,12 +414,12 @@ async function main(family) {
   
   // 月账单
   const getEleBill = async (areaCode, eleCustId) => {
-    let { year, month, checkYear, checkMonth } = getCheckYearMonth();
+    let { year, checkYear, checkMonth } = getCheckYearMonth();
     
     let sameYear = true;
     const isBilling = await queryBillOverview(checkYear, checkMonth);
     if (isBilling) {
-      year = month <= 2 ? year - 1 : year; // 1月和2月时，切换到上一年
+      year = checkYear;
       sameYear = checkYear !== year;
     }
     const [response, balance] = await Promise.all([
@@ -273,117 +449,6 @@ async function main(family) {
         totalPowerYear
       };
     }
-  };
-  
-  /**
-   * 根据当前月份和用电量返回电费信息
-   * 农业用电电价表（根据区域代码）海南，广东，广西，云南，贵州
-   */
-  const calcElectricBill = (totalPower, eleType = '800', areaCode = '') => {
-    const isSummer = new Date().getMonth() + 1 >= 4 && new Date().getMonth() + 1 <= 10;
-  
-    // 农业用电电价表
-    const agriculturalRatesByCode = {
-      '070000': { rate: 0.514 },
-      '440000': { rate: 0.514 },
-      '450000': { rate: 0.510 },
-      '530000': { rate: 0.508 },
-      '520000': { rate: 0.507 }
-    };
-  
-    const agriculturalInfo = agriculturalRatesByCode[areaCode];
-    const agriculturalRate = agriculturalInfo ? agriculturalInfo.rate : 0.514;
-  
-    // 农业用电计算
-    if (eleType === '800') {
-      return {
-        tier: '农用',
-        rate: agriculturalRate,
-        cost: (totalPower * agriculturalRate).toFixed(2),
-        percent: 0,
-        isPercent: '0%',
-        tierIndex: 0,
-        type: '农用'
-      };
-    }
-    
-    // 企事业电价
-    if (eleType === '300') {
-      const enterpriseRate = 0.8696;
-      return {
-        tier: '企业',
-        rate: enterpriseRate,
-        cost: (totalPower * enterpriseRate).toFixed(2),
-        percent: 0,
-        isPercent: '0%',
-        tierIndex: 0,
-        type: '企业'
-      };
-    }
-    
-    // 居民电价档次表（按省份划分）
-    const resRatesProv = {
-      '070000': [ // 海南
-        { limit: isSummer ? 220 : 160, rate: 0.6083, name: '一档' },
-        { limit: isSummer ? 400 : 280, rate: 0.6583, name: '二档' },
-        { rate: 0.9083, name: '三档' }
-      ],
-      '440000': [ // 广东
-        { limit: isSummer ? 210 : 170, rate: 0.67886875, name: '一档' },
-        { limit: isSummer ? 400 : 300, rate: 0.72886875, name: '二档' },
-        { rate: 0.97886875, name: '三档' }
-      ],
-      '450000': [ // 广西
-        { limit: isSummer ? 200 : 180, rate: 0.615, name: '一档' },
-        { limit: isSummer ? 400 : 300, rate: 0.665, name: '二档' },
-        { rate: 0.915, name: '三档' }
-      ],
-      '530000': [ // 云南
-        { limit: isSummer ? 200 : 160, rate: 0.6, name: '一档' },
-        { limit: isSummer ? 400 : 300, rate: 0.65, name: '二档' },
-        { rate: 0.9, name: '三档' }
-      ],
-      '520000': [ // 贵州
-        { limit: isSummer ? 230 : 170, rate: 0.605, name: '一档' },
-        { limit: isSummer ? 400 : 300, rate: 0.655, name: '二档' },
-        { rate: 0.905, name: '三档' }
-      ]
-    };
-  
-    // 取对应省份的阶梯电价，若无匹配则默认海南
-    const provinceRates = resRatesProv[areaCode] || resRatesProv['070000'];
-  
-    let remainingPower = totalPower;
-    let totalCost = 0;
-    let lastTierName = "一档";
-    let tierIndex = 0;
-    
-    for (let i = 0; i < provinceRates.length; i++) {
-      const { limit, rate, name } = provinceRates[i];
-      lastTierName = name;
-      tierIndex = i + 1;
-      
-      let prevLimit = provinceRates[i - 1]?.limit || 0; // 计算上一档的限额
-      let powerThisTier = limit ? Math.min(remainingPower, limit - prevLimit) : remainingPower;
-      totalCost += powerThisTier * rate
-      remainingPower -= powerThisTier;
-      if (remainingPower <= 0) break; 
-    }
-    
-    // 计算占第三档比例
-    const thirdTierLimit = provinceRates[1]?.limit || 1;
-    const percentageOfThird = totalPower / thirdTierLimit;
-    const isPercent = totalPower > 0 ? Math.floor(percentageOfThird * 100) : 0
-    
-    return {
-      tier: lastTierName,
-      rate: provinceRates[tierIndex - 1].rate,
-      cost: totalCost.toFixed(2),
-      percent: percentageOfThird,
-      isPercent: `${isPercent}%`,
-      tierIndex,
-      type: eleType === '500' ? '居民' : '企业'
-    };
   };
   
   /** -------- 提取数据 -------- **/
@@ -424,8 +489,8 @@ async function main(family) {
   const dayBefore = result.length > 0 ? `${result.pop().power} °` : '0.00 °';
   
   // 电费信息
-  const { tier, rate, cost, percent, isPercent, tierIndex, type } = calcElectricBill(totalPower, eleType, areaCode);
-  const { tier: ls_tier, rate: ls_rate, tierIndex: ls_tierIndex } = calcElectricBill(ls_totalPower, eleType, areaCode);
+  const { tier, rate, cost, percent, isPercent, tierIndex, type } = calcElectricBill(totalPower, eleType, areaCode, yearMonth);
+  const { tier: ls_tier, rate: ls_rate, tierIndex: ls_tierIndex } = calcElectricBill(ls_totalPower, eleType, areaCode, lastMonth);
   
   const alipayUrl = 'alipays://platformapi/startapp?appId=2021001164644764';
   const textColor = Color.dynamic(new Color(setting.textLightColor), new Color(setting.textDarkColor));
@@ -441,7 +506,7 @@ async function main(family) {
     if (hours_duration >= 12 && isArrears == 1) {
       setting.updateTime = Date.now()
       writeSettings(setting);
-      module.notify('用电缴费通知❗️', `${userName}，第${ls_tier} ( 电价 ${ls_rate} 元/度 )` + `\n上月用电 ${ls_totalPower} 度 ，待缴电费 ${arrears} 元`);
+      module.notify('用电缴费通知❗️', `${userName}，第${ls_tier} ( 电价 ${ls_rate} 元/度 )` + `\n${lastMonth} 上一账单用电 ${ls_totalPower} 度 ，待缴电费 ${arrears} 元`);
     }
   };
   
@@ -577,7 +642,7 @@ async function main(family) {
     addBodyText(payStack, (!areaCode ? '用户未登录' : isArrears === '1' ? '待缴费' : '已缴费'), Color.white(), 11, 'bold');
     pointStack.addSpacer(8);
     
-    addBodyText(pointStack, (`${ls_tier} ${ls_rate} 元/度`), textColor, 14, null, 0.7);
+    addBodyText(pointStack, formatPreviousBillLabel(lastMonth, ls_tier, ls_rate), textColor, 11, null, 0.7);
     pointStack.addSpacer();
     
     const barStack2 = module.createStack(pointStack);
@@ -814,4 +879,12 @@ async function main(family) {
   };
   await runWidget();
 }
-module.exports = { main }
+module.exports = {
+  main,
+  calcElectricBill,
+  resolveRateAreaCode,
+  parseBillingYearMonth,
+  formatPreviousBillLabel,
+  getRefreshCacheHours,
+  createCacheFileName
+}

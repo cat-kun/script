@@ -4,12 +4,12 @@
 
 async function main() {
   const scriptName = '南方电网'
-  const version = '1.2.3'
-  const updateDate = '2025年01月07日'
+  const version = '1.2.4'
+  const updateDate = '2026年11月09日'
   const pathName = '95du_powerGrid';
   
   const rootUrl = 'https://raw.githubusercontent.com/95du/scripts/master';
-  const scrUrl = `${rootUrl}/api/web_powerGrid.js`;
+  const scrUrl = 'https://raw.githubusercontent.com/cat-kun/script/master/api/web_powerGrid.js';
   
   /**
    * 创建，获取模块路径
@@ -130,6 +130,10 @@ async function main() {
    * @param {string} notice 
    */
   const previewWidget = async (family = 'medium') => {
+    if (settings.update) {
+      const updated = await updateString();
+      if (!updated) console.log('业务模块更新失败，本轮尝试使用本地缓存');
+    }
     const modulePath = await module.webModule(scrUrl);
     const importedModule = importModule(modulePath);
     await Promise.all([
@@ -137,7 +141,6 @@ async function main() {
       updateNotice(),
       module.appleOS_update()
     ]);
-    if (settings.update) await updateString();
     shimoFormData(family);
   };
   
@@ -172,22 +175,38 @@ async function main() {
       options = ['取消', '更新']
     );
     if (index === 0) return;
-    await updateString();
-    ScriptableRun();
+    if (await updateString()) ScriptableRun();
   };
   
   const updateString = async () => {
     const { name } = module.getFileInfo(scrUrl);
     const modulePath = fm.joinPath(cacheStr, name);
-    const str = await module.httpRequest(scrUrl);
-    if (!str.includes('95度茅台')) {
-      module.notify('更新失败 ⚠️', '请检查网络或稍后再试');
-    } else {
-      const moduleDir = fm.joinPath(mainPath, 'Running');
-      if (fm.fileExists(moduleDir)) fm.remove(moduleDir);
-      fm.writeString(modulePath, str)
-      settings.version = version;
-      writeSettings(settings);
+
+    try {
+      const str = await module.httpRequest(scrUrl);
+      if (typeof str !== 'string' || !str.includes('95度茅台') || !str.includes('module.exports')) {
+        module.notify('更新失败 ⚠️', '远端内容校验失败，继续使用本地缓存');
+        return false;
+      }
+
+      const previous = fm.fileExists(modulePath) ? fm.readString(modulePath) : '';
+      const changed = previous !== str;
+      fm.writeString(modulePath, str);
+
+      if (changed) {
+        const moduleDir = fm.joinPath(mainPath, 'Running');
+        if (fm.fileExists(moduleDir)) fm.remove(moduleDir);
+      }
+
+      if (settings.version !== version) {
+        settings.version = version;
+        writeSettings(settings);
+      }
+      return true;
+    } catch (error) {
+      console.log(error);
+      module.notify('更新失败 ⚠️', '网络异常，继续使用本地缓存');
+      return false;
     }
   };
   
@@ -490,8 +509,7 @@ async function main() {
         fm.writeImage(avatarPath, avatarImage);
       },
       install: async () => {
-        await updateString();
-        ScriptableRun();
+        if (await updateString()) ScriptableRun();
       },
       updateCode: async () => updateVersion(),
       changeSettings: (data) => {
